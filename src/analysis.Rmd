@@ -1,0 +1,363 @@
+---
+title: "Persistencia de la inflación"
+author: "María Harfush"
+date: "2025-04-08"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+library(writexl)
+```
+
+```{r}
+leer_hoja <- function(sheet_name, range = NULL) 
+{
+  read_excel("../data/raw/inflation_data.xlsx",
+             sheet = sheet_name,
+             col_names = TRUE,
+             col_types = NULL,
+             na = c("", "N/E", "NA"),
+             trim_ws = TRUE,
+             range = range)
+}
+sheets <- list(
+  list(name = "inf_general", range = NULL),
+  list(name = "inf_subyacente", range = NULL))
+sheets_data <- list()
+for (sheet in sheets)
+{
+  sheets_data[[sheet$name]] <- leer_hoja(sheet$name, range = sheet$range)
+}
+inf_general <- sheets_data[["inf_general"]]
+inf_subyacente <- sheets_data[["inf_subyacente"]]
+
+head(inf_subyacente)
+head(inf_general)
+```
+
+```{r}
+calcular_persistencia <- function(serie) {
+  serie <- serie[!is.na(serie)]
+  media_serie <- mean(serie)
+  cruces <- sum(diff(sign(serie - media_serie)) != 0) 
+  T <- length(serie)
+  persistencia <- 1 - (cruces / T)
+  return(persistencia)
+}
+```
+#Cálculo de persistencia de inflación en países 
+  Ventana móvil de 120 meses = 10 años, desde Enero 1990 a Diciembre 2024.
+    
+```{r}
+corr_movil <- function(data, ventana = 120) {
+  
+  fechas <- my(data[[1]]) 
+  inflacion_paises <- data[, -1]
+  
+# Almacenar resultados
+  resultados <- tibble(
+    Pais = character(),
+    Fecha_Inicio = as.Date(character()),
+    Fecha_Fin = as.Date(character()),
+    Promedio = numeric(),
+    Persistencia = numeric(),
+    Observaciones = integer()
+  )
+# Bucle para realizar ejercicio en cada país
+  for (pais in names(inflacion_paises)) {
+    serie <- inflacion_paises[[pais]]
+    serie_fechas <- fechas
+    
+    datos_pais <- tibble(Fecha = serie_fechas, Inflacion = serie) %>% drop_na()
+    
+    if (nrow(datos_pais) >= ventana) {
+      for (i in 1:(nrow(datos_pais) - ventana + 1)) {
+        subserie <- datos_pais$Inflacion[i:(i + ventana - 1)]
+        subfechas <- datos_pais$Fecha[i:(i + ventana - 1)]
+        
+        resultados <- resultados %>% add_row(
+          Pais = pais,
+          Fecha_Inicio = subfechas[1],
+          Fecha_Fin = subfechas[length(subfechas)],
+          Promedio = mean(subserie, na.rm = TRUE),
+          Persistencia = calcular_persistencia(subserie),
+          Observaciones = length(subserie)
+        )
+      }
+    }
+  }
+    return(resultados)
+}
+
+persistencia_sub_gen <- function(inf_gen, inf_sub, datos1 = "Inf_gen", datos2 = "Inf_sub", ventana = 120) {
+  
+  # Aplicar corr_movil a la primera base
+  res_inf_gen <- corr_movil(inf_gen, ventana = ventana)
+  print(paste("Resultados para:", datos1))
+  View(res_inf_gen)
+  
+  # Aplicar corr_movil a la segunda base
+  res_inf_sub <- corr_movil(inf_sub, ventana = ventana)
+  print(paste("Resultados para:", datos2))
+  View(res_inf_sub)
+  
+  # Devolver ambos resultados como lista
+  return(list(Resultados_inf_gen = res_inf_gen,
+              Resultados_inf_sub = res_inf_sub))
+}
+
+resultados_sub_gen <- persistencia_sub_gen(
+  inf_gen = inf_general,
+  inf_sub = inf_subyacente,
+  datos1 = "inflación general",
+  datos2 = "inflación subyacente",
+  ventana = 120
+)
+
+#head(resultados_sub_gen$Resultados_inf_gen)
+#head(resultados_sub_gen$Resultados_inf_sub)
+
+```
+#Graficar resultados por región
+
+```{r}
+clasificacion_paises <- tibble(
+  Pais = c(
+    "Brasil", "Chile", "Colombia", "México", "Paraguay", "Perú", "Uruguay",
+    "Suiza", "Zona Euro", "Reino Unido", "Canadá", "Japón", "Suecia", "Estados Unidos", "Noruega",
+    "Australia", "China", "Corea", "Filipinas", "India", "Indonesia", "Malasia", "Nueva Zelandia", "Tailandia",
+    "Hungría", "Polonia", "Rep. Checa", "Rumania", "Rusia", "Turquía", "Ucrania", "Egipto", "Israel", "Sudáfrica"
+  ),
+  Region = c(
+    rep("América Latina", 7),
+    rep("Economías Avanzadas", 8),
+    rep("Asia y Oceanía", 9),
+    rep("Europa del Este y Medio Oriente y África", 10)
+  )
+)
+```
+## Clasificación de regiones y categorías de color
+```{r}
+graficar_por_region <- function(resultados, region_nombre, orden_paises_region) {
+
+  datos_region <- resultados %>%
+    filter(Region == region_nombre) %>%
+    mutate(Pais = factor(Pais, levels = orden_paises_region))
+
+cor_textos <- datos_region %>%
+  group_by(Pais) %>%
+  summarise(
+    corr_pre = if (sum(!is.na(Promedio[Fecha_Fin < as.Date("2020-01-01")])) > 1 &
+                  sum(!is.na(Persistencia[Fecha_Fin < as.Date("2020-01-01")])) > 1) {
+      cor(Promedio[Fecha_Fin < as.Date("2020-01-01")], Persistencia[Fecha_Fin < as.Date("2020-01-01")], use = "complete.obs")
+    } else {
+      NA
+    },
+    corr_post_pande = if (sum(!is.na(Promedio[Fecha_Fin >= as.Date("2020-01-01")])) > 1 &
+                   sum(!is.na(Persistencia[Fecha_Fin >= as.Date("2020-01-01")])) > 1) {
+      cor(Promedio[Fecha_Fin >= as.Date("2020-01-01")], Persistencia[Fecha_Fin >= as.Date("2020-01-01")], use = "complete.obs")
+    } else {
+      NA
+    }
+  ) %>%
+  mutate(
+    texto = paste0(
+      "Pre-2020: ", ifelse(is.na(corr_pre), "N/A", round(corr_pre, 2)),
+      "\nPost-2020: ", ifelse(is.na(corr_post_pande), "N/A", round(corr_post_pande, 2))
+    )
+  )
+
+  ggplot(datos_region, aes(x = Promedio, y = Persistencia)) +
+    geom_point(aes(color = Color, alpha = Fecha_Fin)) +
+    facet_wrap(~Pais, scales = "free", ncol = 3, nrow = 4) +
+    geom_text(
+  data = cor_textos,
+  aes(x = Inf, y = -Inf, label = texto),
+  hjust = 1.1, vjust = -0.1,
+  inherit.aes = FALSE,
+  size = 2.5
+    ) +
+    scale_color_manual(values = c(
+      "Economías Avanzadas" = "navy",
+      "México" = "firebrick",
+      "Emergentes América Latina" = "springgreen4",
+      "Emergentes Asia y Oceanía" = "goldenrod2",
+      "Emergentes Europa del Este y África" = "#E6006E"
+    )) +
+    scale_alpha_date(
+    range = c(0.2, 1),
+    name = "Fecha final del periodo"
+  ) +
+  guides(
+    color = "none",
+    alpha = guide_legend(
+      title.position = "top",
+      title.hjust = 0.5
+    )
+  ) +
+  theme_minimal() +
+  labs(
+    title = paste("Correlación entre la Persistencia y el Nivel Promedio de la Inflación a.e -", region_nombre),
+    x = "Inflación promedio mensual a.e.",
+    y = "Persistencia"
+  ) +
+  theme(
+      legend.position = "bottom",
+      strip.text = element_text(size = 7),
+      plot.title = element_text(size = 10)
+    )
+}
+
+Resultados_gen <- resultados_sub_gen$Resultados_inf_gen %>%
+  left_join(clasificacion_paises, by = "Pais") %>%
+  mutate(
+    Color = case_when(
+      Pais == "México" ~ "México",
+      Region == "Economías Avanzadas" ~ "Economías Avanzadas",
+      Region == "América Latina" ~ "Emergentes América Latina",
+      Region == "Asia y Oceanía" ~ "Emergentes Asia y Oceanía",
+      Region == "Europa del Este y Medio Oriente y África" ~ "Emergentes Europa del Este y África",
+      TRUE ~ "Otros"
+    )
+  )
+
+Resultados_sub <- resultados_sub_gen$Resultados_inf_sub %>%
+  left_join(clasificacion_paises, by = "Pais") %>%
+  mutate(
+    Color = case_when(
+      Pais == "México" ~ "México",
+      Region == "Economías Avanzadas" ~ "Economías Avanzadas",
+      Region == "América Latina" ~ "Emergentes América Latina",
+      Region == "Asia y Oceanía" ~ "Emergentes Asia y Oceanía",
+      Region == "Europa del Este y Medio Oriente y África" ~ "Emergentes Europa del Este y África",
+      TRUE ~ "Otros"
+    )
+  )
+
+# América Latina
+orden_latam <- c("Brasil", "Chile", "Colombia", "México", "Paraguay", "Perú", "Uruguay")
+graficar_por_region(Resultados_gen, "América Latina", orden_latam)
+
+# Economías avanzadas
+orden_avanzadas <- c("Suiza", "Zona Euro", "Reino Unido", "Canadá", "Japón", "Suecia", "Estados Unidos", "Noruega")
+graficar_por_region(Resultados_gen, "Economías Avanzadas", orden_avanzadas)
+
+# Asia y Oceanía
+orden_asia <- c("Australia", "China", "Corea", "Filipinas", "India", "Indonesia", "Malasia", "Nueva Zelandia", "Tailandia")
+graficar_por_region(Resultados_gen, "Asia y Oceanía", orden_asia)
+
+# Europa del Este y Medio Oriente y África
+orden_europa_este <- c("Hungría", "Polonia", "Rep. Checa", "Rumania", "Rusia", "Turquía", "Ucrania", "Egipto", "Israel", "Sudáfrica")
+graficar_por_region(Resultados_gen, "Europa del Este y Medio Oriente y África", orden_europa_este)
+
+#graficar_por_region(Resultados_sub, "América Latina", orden_latam)
+#graficar_por_region(Resultados_sub, "Economías Avanzadas", orden_avanzadas)
+#graficar_por_region(Resultados_sub, "Asia y Oceanía", orden_asia)
+#graficar_por_region(Resultados_sub, "Europa del Este y Medio Oriente y África", orden_europa_este)
+
+```
+#Almacenar los coeficientes de correlación para las 32 economías para el periodo pre y post pandemia para explicar la parte de la persistencia de la infflación.
+```{r}
+calcular_correlaciones <- function(resultados, region_nombre, orden_paises_region) {
+  datos_region <- resultados %>%
+    filter(Region == region_nombre) %>%
+    mutate(Pais = factor(Pais, levels = orden_paises_region))
+  
+  cor_textos <- datos_region %>%
+    group_by(Pais) %>%
+    summarise(
+      corr_pre = if (sum(!is.na(Promedio[Fecha_Fin < as.Date("2020-01-01")])) > 1 &
+                    sum(!is.na(Persistencia[Fecha_Fin < as.Date("2020-01-01")])) > 1) {
+        cor(Promedio[Fecha_Fin < as.Date("2020-01-01")], Persistencia[Fecha_Fin < as.Date("2020-01-01")], use = "complete.obs")
+      } else {
+        NA
+      },
+      corr_post_pande = if (sum(!is.na(Promedio[Fecha_Fin >= as.Date("2020-01-01")])) > 1 &
+                     sum(!is.na(Persistencia[Fecha_Fin >= as.Date("2020-01-01")])) > 1) {
+        cor(Promedio[Fecha_Fin >= as.Date("2020-01-01")], Persistencia[Fecha_Fin >= as.Date("2020-01-01")], use = "complete.obs")
+      } else {
+        NA
+      }
+    ) %>%
+    mutate(
+      Diferencial = corr_post_pande - corr_pre,
+      Region = region_nombre
+    )
+  
+  return(cor_textos)
+}
+
+correlaciones_latam <- calcular_correlaciones(Resultados_gen, "América Latina", orden_latam)
+correlaciones_avanzadas <- calcular_correlaciones(Resultados_gen, "Economías Avanzadas", orden_avanzadas)
+correlaciones_asia <- calcular_correlaciones(Resultados_gen, "Asia y Oceanía", orden_asia)
+correlaciones_europa_este <- calcular_correlaciones(Resultados_gen, "Europa del Este y Medio Oriente y África", orden_europa_este)
+
+correlaciones_totales <- bind_rows(
+  correlaciones_latam,
+  correlaciones_avanzadas,
+  correlaciones_asia,
+  correlaciones_europa_este
+)
+
+correlaciones_totales
+
+```
+#Almacenar resultados como imágen.
+```{r}
+ruta_destino <- "../results"
+
+if (!dir.exists(ruta_destino)) dir.create(ruta_destino, recursive = TRUE)
+
+guardar_grafica_doble <- function(region, resultados, orden, tipo_inflacion) {
+  p <- graficar_por_region(resultados, region, orden)
+  
+  region_clean <- gsub(" ", "_", region)
+  tipo_clean <- gsub(" ", "_", tipo_inflacion)
+
+  nombre_archivo <- paste0("grafica_", region_clean, "_", tipo_clean)
+  
+ggsave(
+  filename = file.path(ruta_destino, paste0(nombre_archivo, ".pdf")),
+  plot = p,
+  width = 7,
+  height = 5,
+  dpi = 600,
+  device = cairo_pdf
+)
+
+ggsave(
+  filename = file.path(ruta_destino, paste0(nombre_archivo, ".png")),
+  plot = p,
+  width = 7,
+  height = 5,
+  dpi = 600
+)
+}
+
+# Guardar todas las gráficas - Inflación General
+guardar_grafica_doble("América Latina", Resultados_gen, orden_latam, "Inflación General")
+guardar_grafica_doble("Economías Avanzadas", Resultados_gen, orden_avanzadas, "Inflación General")
+guardar_grafica_doble("Asia y Oceanía", Resultados_gen, orden_asia, "Inflación General")
+guardar_grafica_doble("Europa del Este y Medio Oriente y África", Resultados_gen, orden_europa_este, "Inflación General")
+
+# Guardar todas las gráficas - Inflación Subyacente
+guardar_grafica_doble("América Latina", Resultados_sub, orden_latam, "Inflación Subyacente")
+guardar_grafica_doble("Economías Avanzadas", Resultados_sub, orden_avanzadas, "Inflación Subyacente")
+guardar_grafica_doble("Asia y Oceanía", Resultados_sub, orden_asia, "Inflación Subyacente")
+guardar_grafica_doble("Europa del Este y Medio Oriente y África", Resultados_sub, orden_europa_este, "Inflación Subyacente")
+```
+#Guardar resultados de los coeficiente de correlación y su diferencial.
+```{r}
+ruta_excel <- "../results/correlaciones_totales.xlsx"
+
+write_xlsx(correlaciones_totales, path = ruta_excel)
+
+```
+Fuente:
+Evidencia Internacional de la Correlación entre el Nivel de Inflación Promedio y su Persistencia
+https://www.banxico.org.mx/publicaciones-y-prensa/informes-trimestrales/recuadros/%7BDC0F64F3-0F18-785D-F7AC-D83D2262BE0F%7D.pdf
